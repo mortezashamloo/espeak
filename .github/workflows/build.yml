@@ -1,13 +1,22 @@
-# Put this file in your repo as .github/workflows/build.yml, and upload
-# espeak-1.48.15-with-windows.zip to the repo root (no need to unpack it).
-name: Build espeak (DLL + SAPI5 + installer)
+name: Build eSpeak 1.48.15 for Windows
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Publish a GitHub Release with this tag, e.g. v1.48.15-win.1 (leave empty to only build)"
+        required: false
+        default: ""
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
 
 jobs:
-  # SAPI5 engine, built with Visual C++ on a Windows runner.
-  # If it fails, the installer is still built (without SAPI5).
+  # 1) SAPI5 engine (espeak_sapi.dll), built with Visual C++ on a Windows runner.
+  #    If this job fails, the installer is still built, just without SAPI5 voices.
   sapi:
     runs-on: windows-latest
     continue-on-error: true
@@ -18,21 +27,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Unpack the zip
-        shell: pwsh
-        run: Expand-Archive -Path espeak-1.48.15-with-windows.zip -DestinationPath espeak
-
       - name: Build espeak_sapi.dll (${{ matrix.arch }})
         shell: cmd
-        working-directory: espeak
         run: python tools\sapi\build_sapi.py --arch ${{ matrix.arch }}
 
       - uses: actions/upload-artifact@v4
         with:
           name: sapi-${{ matrix.arch }}
-          path: espeak/build-out/sapi/espeak_sapi-${{ matrix.arch }}.dll
+          path: build-out/sapi/espeak_sapi-${{ matrix.arch }}.dll
 
-  # DLL, command-line tool, dictionaries and installer (MinGW-w64 + NSIS on Linux)
+  # 2) DLLs, command-line tools, dictionaries and the installer (MinGW-w64 + NSIS on Linux)
   installer:
     needs: sapi
     if: ${{ !cancelled() }}
@@ -40,20 +44,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Unpack the zip
-        run: unzip -q espeak-1.48.15-with-windows.zip -d espeak
-
       - name: Install tools (MinGW-w64, NSIS)
         run: |
           sudo apt-get update
           sudo apt-get install -y mingw-w64 nsis
 
       - name: Compile dictionaries from dictsource
-        working-directory: espeak
         run: bash tools/compile-dicts.sh
 
-      - name: Build espeak.dll and espeak-cli.exe
-        working-directory: espeak
+      - name: Build espeak.dll, espeak-cli.exe and espeak-voices.exe (64-bit and 32-bit)
         run: bash tools/build-windows-dll.sh
 
       - name: Get the SAPI5 DLLs (if the Windows job succeeded)
@@ -61,23 +60,55 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: sapi-*
-          path: espeak/build-out/sapi
+          path: build-out/sapi
           merge-multiple: true
 
-      - name: Build the installer
-        working-directory: espeak
+      - name: Build the installer (setup_espeak_1.48.15.exe)
         run: bash tools/build-installer.sh
 
       - uses: actions/upload-artifact@v4
         with:
           name: setup_espeak_1.48.15
-          path: espeak/build-out/setup_espeak_1.48.15.exe
+          path: build-out/setup_espeak_1.48.15.exe
 
       - uses: actions/upload-artifact@v4
         with:
           name: espeak-1.48.15-windows-files
           path: |
-            espeak/build-out/espeak-x86_64.dll
-            espeak/build-out/espeak-i686.dll
-            espeak/build-out/espeak-cli-x86_64.exe
-            espeak/build-out/espeak-cli-i686.exe
+            build-out/espeak-x86_64.dll
+            build-out/espeak-i686.dll
+            build-out/espeak-cli-x86_64.exe
+            build-out/espeak-cli-i686.exe
+            build-out/espeak-voices-i686.exe
+            build-out/espeak-voices-x86_64.exe
+
+  # 3) GitHub Release (only for a pushed v* tag, or when a release tag was typed in "Run workflow")
+  release:
+    needs: installer
+    if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.release_tag != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          TAG="${INPUT_TAG:-$REF_NAME}"
+          mkdir -p release
+          cp dist/setup_espeak_1.48.15/setup_espeak_1.48.15.exe release/
+          (cd dist/espeak-1.48.15-windows-files && zip -q ../../release/espeak-1.48.15-windows-files.zip ./*)
+          (cd release && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          gh release create "$TAG" release/* \
+            --target "$GITHUB_SHA" \
+            --title "eSpeak 1.48.15 for Windows ($TAG)" \
+            --notes-file tools/release-notes.md
