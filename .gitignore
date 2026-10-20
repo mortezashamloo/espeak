@@ -1,0 +1,17 @@
+# build output of the Windows build kit
+build-out/
+build-tmp/
+__pycache__/
+*.pyc
+
+# intermediate build output of the original sources
+*.o
+libespeak.a
+libespeak.so*
+
+# programs built from the original sources (anchored, so folders such as
+# platforms/windows/espeakedit are NOT ignored)
+/src/espeak
+/src/espeakedit
+/src/speak
+platforms/*/espeak-phoneme-data
